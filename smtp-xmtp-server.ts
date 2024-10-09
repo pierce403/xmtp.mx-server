@@ -1,158 +1,101 @@
-// SMTP server with XMTP integration
-import { SMTPServer } from 'smtp-server';
-import { simpleParser } from 'mailparser';
 import { Client } from '@xmtp/xmtp-js';
-import { ethers } from 'ethers';
-import dotenv from 'dotenv';
-import { Readable } from 'stream';
+import { Wallet } from 'ethers';
+import * as dotenv from 'dotenv';
+import formData from 'form-data';
+import Mailgun from 'mailgun.js';
 
 dotenv.config();
 
-const INFURA_KEY = process.env.INFURA_KEY;
-if (!INFURA_KEY) {
-  console.error('INFURA_KEY environment variable is not set');
-  process.exit(1);
+const XMTP_PRIVATE_KEY = process.env.XMTP_PRIVATE_KEY || '';
+const MAILGUN_API_KEY = process.env.MAILGUN_API_KEY || '';
+const MAILGUN_DOMAIN = process.env.MAILGUN_DOMAIN || '';
+
+const mailgun = new Mailgun(formData);
+const mg = mailgun.client({ username: 'api', key: MAILGUN_API_KEY });
+
+async function initializeXMTPClient(): Promise<Client> {
+  const wallet = new Wallet(XMTP_PRIVATE_KEY);
+  return await Client.create(wallet, { env: 'production' });
 }
 
-const SMTP_PORT = 2525;
-const SMTP_HOST = '0.0.0.0';
-const XMTP_SENDER_ADDRESS = 'xmtpmx.eth';
-const FALLBACK_XMTP_ADDRESS = '0x1234567890123456789012345678901234567890'; // Fallback address if ENS resolution fails
-
-const provider = new ethers.providers.JsonRpcProvider(`https://mainnet.infura.io/v3/${INFURA_KEY}`);
-let xmtpClient: Client;
-let xmtpSenderAddress: string;
-
-async function initializeXMTPClient(): Promise<void> {
+async function sendEmail(to: string, subject: string, body: string): Promise<void> {
   try {
-    console.log('Initializing XMTP client...');
-    const wallet = ethers.Wallet.createRandom();
-    xmtpClient = await Client.create(wallet, { env: 'production' });
-    console.log(`XMTP client initialized with address: ${xmtpClient.address}`);
-
-    // Resolve xmtpmx.eth to its Ethereum address
-    xmtpSenderAddress = await resolveENS(XMTP_SENDER_ADDRESS);
-    console.log(`Using XMTP sender address: ${xmtpSenderAddress}`);
-  } catch (error) {
-    console.error('Error initializing XMTP client:', error);
-    process.exit(1);
-  }
-}
-
-async function resolveENS(ensName: string): Promise<string> {
-  try {
-    console.log(`Resolving ENS name: ${ensName}`);
-    const address = await provider.resolveName(ensName);
-    if (!address) {
-      console.log(`Failed to resolve ENS name: ${ensName}. Using fallback address.`);
-      return FALLBACK_XMTP_ADDRESS;
-    }
-    console.log(`Resolved ${ensName} to ${address}`);
-    return address;
-  } catch (error) {
-    console.error(`Error resolving ENS name ${ensName}:`, error);
-    console.log(`Using fallback address for ${ensName}.`);
-    return FALLBACK_XMTP_ADDRESS;
-  }
-}
-
-async function handleEmail(stream: Readable, session: any, callback: (error?: Error) => void): Promise<void> {
-  let buffer = '';
-  stream.on('data', (chunk: Buffer) => {
-    buffer += chunk.toString();
-  });
-
-  stream.on('end', async () => {
-    try {
-      const parsedEmail = await simpleParser(buffer);
-      console.log('Parsed email:', JSON.stringify(parsedEmail, null, 2));
-
-      let to: string | undefined;
-      if (Array.isArray(parsedEmail.to)) {
-        to = (parsedEmail.to[0] as any).address;
-      } else if (parsedEmail.to) {
-        to = (parsedEmail.to as any).address;
-      }
-
-      if (!to) {
-        throw new Error('Invalid email: missing recipient');
-      }
-      const ensName = to.split('@')[0];
-      console.log(`Extracted ENS name: ${ensName}`);
-
-      if (!ensName.endsWith('.eth')) {
-        throw new Error('Invalid ENS name format');
-      }
-
-      const content = parsedEmail.text || '';
-      const resolvedAddress = await resolveENS(ensName);
-      await sendXMTPMessage(resolvedAddress, content);
-      console.log('XMTP message sent successfully.');
-      callback();
-    } catch (error) {
-      console.error('Error processing email:', error);
-      callback(new Error('Error processing email'));
-    }
-  });
-
-  stream.on('error', (error: Error) => {
-    console.error('Error reading email stream:', error);
-    callback(new Error('Error reading email'));
-  });
-}
-
-async function sendXMTPMessage(toAddress: string, content: string): Promise<void> {
-  console.log(`Sending XMTP message to ${toAddress}...`);
-  try {
-    const conversation = await xmtpClient.conversations.newConversation(toAddress);
-    await conversation.send(content);
-    console.log(`XMTP message sent successfully from ${XMTP_SENDER_ADDRESS} to ${toAddress}.`);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('not on the XMTP network')) {
-      console.warn(`Recipient ${toAddress} is not on the XMTP network. Message not sent.`);
-    } else {
-      console.error('Error sending XMTP message:', error);
-    }
-    // Don't throw the error, allow the process to continue
-  }
-}
-
-async function sendStartupMessage(): Promise<void> {
-  const startupMessage = "XMTP-MX Server Starting";
-  const recipientENS = "deanpierce.eth";
-  try {
-    const recipientAddress = await resolveENS(recipientENS);
-    await sendXMTPMessage(recipientAddress, startupMessage);
-    console.log(`Startup message sent to ${recipientENS}`);
-  } catch (error) {
-    console.error(`Failed to send startup message to ${recipientENS}:`, error);
-  }
-}
-
-function startSMTPServer(): SMTPServer {
-  console.log('Starting SMTP server...');
-  const server = new SMTPServer({
-    authOptional: true,
-    onData: handleEmail,
-  });
-
-  server.listen(SMTP_PORT, SMTP_HOST);
-  console.log(`SMTP server running on ${SMTP_HOST}:${SMTP_PORT}`);
-  return server;
-}
-
-async function main(): Promise<void> {
-  await initializeXMTPClient();
-  await sendStartupMessage();
-  const server = startSMTPServer();
-
-  process.on('SIGINT', () => {
-    console.log('Stopping server...');
-    server.close(() => {
-      console.log('Server stopped.');
-      process.exit(0);
+    await mg.messages.create(MAILGUN_DOMAIN, {
+      from: `XMTP-MX Server <noreply@${MAILGUN_DOMAIN}>`,
+      to: [to],
+      subject: subject,
+      text: body,
     });
-  });
+    console.log(`Email sent to ${to}`);
+  } catch (error) {
+    console.error('Error sending email:', error);
+    throw error;
+  }
 }
 
-main().catch(console.error);
+async function parseXMTPMessage(content: string): Promise<{ to: string; subject: string; body: string }> {
+  const lines = content.split('\n');
+  let to = '';
+  let subject = '';
+  let body = '';
+  let isBody = false;
+
+  for (const line of lines) {
+    if (line.startsWith('To:')) {
+      to = line.substring(3).trim();
+    } else if (line.startsWith('Subject:')) {
+      subject = line.substring(8).trim();
+    } else if (line.trim() === '') {
+      isBody = true;
+    } else if (isBody) {
+      body += line + '\n';
+    }
+  }
+
+  if (!to || !to.endsWith('.eth')) {
+    throw new Error('Invalid or missing "to" address in the XMTP message');
+  }
+
+  return { to, subject, body: body.trim() };
+}
+
+async function handleIncomingXMTPMessage(message: any): Promise<void> {
+  try {
+    const { to, subject, body } = await parseXMTPMessage(message.content);
+    await sendEmail(to, subject, body);
+  } catch (error) {
+    console.error('Error processing XMTP message:', error);
+    await sendErrorNotification(error as Error, 'deanpierce.eth');
+    if (message.senderAddress) {
+      await sendErrorNotification(error as Error, message.senderAddress);
+    }
+  }
+}
+
+async function sendErrorNotification(error: Error, to: string): Promise<void> {
+  const subject = 'Error processing your message';
+  const body = `An error occurred while processing your message: ${error.message}`;
+  try {
+    await sendEmail(to, subject, body);
+  } catch (emailError) {
+    console.error(`Failed to send error notification to ${to}:`, emailError);
+  }
+}
+
+async function main() {
+  const xmtp = await initializeXMTPClient();
+  console.log('XMTP client initialized');
+
+  // Send startup message
+  await sendEmail('deanpierce.eth', 'XMTP-MX Server Starting', 'The XMTP-MX Server is now starting up.');
+
+  const stream = await xmtp.conversations.stream();
+  console.log('Listening for new XMTP messages...');
+
+  for await (const conversation of stream) {
+    for await (const message of await conversation.streamMessages()) {
+      console.log(`New message from ${message.senderAddress}: ${message.content}`);
+      await handleIncomingXMTPMessage(message);
+    }
+  }
+}

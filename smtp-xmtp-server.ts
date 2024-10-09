@@ -67,7 +67,13 @@ async function handleEmail(stream: Readable, session: any, callback: (error?: Er
       const parsedEmail = await simpleParser(buffer);
       console.log('Parsed email:', JSON.stringify(parsedEmail, null, 2));
 
-      const to = parsedEmail.to?.text;
+      let to: string | undefined;
+      if (Array.isArray(parsedEmail.to)) {
+        to = (parsedEmail.to[0] as any).address;
+      } else if (parsedEmail.to) {
+        to = (parsedEmail.to as any).address;
+      }
+
       if (!to) {
         throw new Error('Invalid email: missing recipient');
       }
@@ -98,18 +104,28 @@ async function handleEmail(stream: Readable, session: any, callback: (error?: Er
 async function sendXMTPMessage(toAddress: string, content: string): Promise<void> {
   console.log(`Sending XMTP message to ${toAddress}...`);
   try {
-    const conversation = await xmtpClient.conversations.newConversation(toAddress, { conversationId: XMTP_SENDER_ADDRESS });
+    const conversation = await xmtpClient.conversations.newConversation(toAddress);
     await conversation.send(content);
     console.log(`XMTP message sent successfully from ${XMTP_SENDER_ADDRESS} to ${toAddress}.`);
   } catch (error) {
     if (error instanceof Error && error.message.includes('not on the XMTP network')) {
-      console.warn(`Recipient ${toAddress} is not on the XMTP network. Falling back to logging.`);
-      console.log(`Message content for ${toAddress}: ${content}`);
-      // Implement additional fallback mechanism here if needed
+      console.warn(`Recipient ${toAddress} is not on the XMTP network. Message not sent.`);
     } else {
       console.error('Error sending XMTP message:', error);
     }
     // Don't throw the error, allow the process to continue
+  }
+}
+
+async function sendStartupMessage(): Promise<void> {
+  const startupMessage = "XMTP-MX Server Starting";
+  const recipientENS = "deanpierce.eth";
+  try {
+    const recipientAddress = await resolveENS(recipientENS);
+    await sendXMTPMessage(recipientAddress, startupMessage);
+    console.log(`Startup message sent to ${recipientENS}`);
+  } catch (error) {
+    console.error(`Failed to send startup message to ${recipientENS}:`, error);
   }
 }
 
@@ -127,6 +143,7 @@ function startSMTPServer(): SMTPServer {
 
 async function main(): Promise<void> {
   await initializeXMTPClient();
+  await sendStartupMessage();
   const server = startSMTPServer();
 
   process.on('SIGINT', () => {
